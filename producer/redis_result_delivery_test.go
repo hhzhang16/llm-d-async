@@ -86,12 +86,18 @@ func TestReceiveResultExpiredLeaseRedeliversAndFencesStaleOwner(t *testing.T) {
 	keys := newResultClaimKeys("results")
 	mr.ZAdd(keys.idx, -1, stale.claimID)
 
+	err := first.RenewResult(context.Background(), stale)
+	assert.ErrorIs(t, err, ErrResultDeliveryOwnershipLost)
+	err = first.AckResult(context.Background(), stale)
+	assert.ErrorIs(t, err, ErrResultDeliveryOwnershipLost)
+	assert.EqualValues(t, 1, first.client.HLen(context.Background(), keys.claimed).Val())
+
 	redelivered := receiveWithTimeout(t, second)
 	assert.Equal(t, stale.Result.ID, redelivered.Result.ID)
 	assert.Equal(t, stale.Result.Routing.RequestToken, redelivered.Result.Routing.RequestToken)
 	assert.NotEqual(t, stale.ownerToken, redelivered.ownerToken)
 
-	err := first.RenewResult(context.Background(), stale)
+	err = first.RenewResult(context.Background(), stale)
 	assert.ErrorIs(t, err, ErrResultDeliveryOwnershipLost)
 	err = first.AckResult(context.Background(), stale)
 	assert.ErrorIs(t, err, ErrResultDeliveryOwnershipLost)
@@ -126,11 +132,12 @@ func TestRenewResultExtendsLease(t *testing.T) {
 	delivery := receiveWithTimeout(t, p)
 
 	keys := newResultClaimKeys("results")
-	mr.ZAdd(keys.idx, 1, delivery.claimID)
+	oldExpiry := float64(time.Now().Add(time.Second).UnixMilli())
+	mr.ZAdd(keys.idx, oldExpiry, delivery.claimID)
 	require.NoError(t, p.RenewResult(context.Background(), delivery))
 	score, err := mr.ZScore(keys.idx, delivery.claimID)
 	require.NoError(t, err)
-	assert.Greater(t, score, float64(time.Now().UnixMilli()))
+	assert.Greater(t, score, oldExpiry)
 }
 
 func TestReceiveResultRouteIsolation(t *testing.T) {

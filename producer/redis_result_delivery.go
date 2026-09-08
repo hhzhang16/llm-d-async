@@ -112,11 +112,13 @@ return {0}
 `)
 
 var renewResultScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] or ARGV[2] == '' then
-  return 0
-end
 local serverTime = redis.call('TIME')
 local now = (tonumber(serverTime[1]) * 1000) + math.floor(tonumber(serverTime[2]) / 1000)
+local owner = redis.call('HGET', KEYS[1], ARGV[1])
+local expiry = redis.call('ZSCORE', KEYS[2], ARGV[1])
+if not owner or owner ~= ARGV[2] or ARGV[2] == '' or not expiry or tonumber(expiry) <= now then
+  return 0
+end
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[3]), ARGV[1])
 return 1
 `)
@@ -132,7 +134,8 @@ if #expiredTombstones > 0 then
   redis.call('ZREM', KEYS[4], unpack(expiredTombstones))
 end
 local owner = redis.call('HGET', KEYS[2], ARGV[1])
-if owner and owner == ARGV[2] and ARGV[2] ~= '' then
+local expiry = redis.call('ZSCORE', KEYS[3], ARGV[1])
+if owner and owner == ARGV[2] and ARGV[2] ~= '' and expiry and tonumber(expiry) > now then
   redis.call('HDEL', KEYS[1], ARGV[1])
   redis.call('HDEL', KEYS[2], ARGV[1])
   redis.call('ZREM', KEYS[3], ARGV[1])
