@@ -256,22 +256,44 @@ func TestReceiveResultValidationAndCancellation(t *testing.T) {
 	assert.False(t, errors.Is(p.AckResult(context.Background(), &ResultDelivery{}), ErrResultDeliveryOwnershipLost))
 }
 
-func TestReceiveResultMalformedRecordDoesNotBlockRoute(t *testing.T) {
+func TestReceiveResultUnparsableRecordsRemainDurableAndDoNotBlockRoute(t *testing.T) {
 	mr := miniredis.RunT(t)
 	p := setupDurableResultProducer(t, mr, "results")
 	pushDurableResult(t, mr, "results", "valid", "generation-1")
-	_, err := mr.RPush("results", `{"id":123,"payload":"invalid"}`)
+
+	goRejected := `{"id":"schema-skew","status_code":"not-a-number","payload":"invalid"}`
+	luaRejected := `{"id":123,"payload":"invalid"}`
+	_, err := mr.RPush("results", goRejected, luaRejected)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	delivery, err := p.ReceiveResult(ctx)
-	assert.ErrorContains(t, err, "failed to parse durable result")
-	assert.Nil(t, delivery)
+	for range 2 {
+		delivery, receiveErr := p.ReceiveResult(context.Background())
+		assert.ErrorIs(t, receiveErr, ErrUnparsableResult)
+		assert.Nil(t, delivery)
+	}
 
-	delivery = receiveWithTimeout(t, p)
+	keys := newResultClaimKeys("results")
+	assert.EqualValues(t, 2, p.client.HLen(context.Background(), keys.claimed).Val())
+	claimedPayloads, err := p.client.HVals(context.Background(), keys.claimed).Result()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{goRejected, luaRejected}, claimedPayloads)
+
+	delivery := receiveWithTimeout(t, p)
 	assert.Equal(t, "valid", delivery.Result.ID)
 	require.NoError(t, p.AckResult(context.Background(), delivery))
+
+	claimIDs, err := p.client.ZRange(context.Background(), keys.idx, 0, -1).Result()
+	require.NoError(t, err)
+	require.Len(t, claimIDs, 2)
+	for _, claimID := range claimIDs {
+		mr.ZAdd(keys.idx, -1, claimID)
+	}
+	for range 2 {
+		redelivery, receiveErr := p.ReceiveResult(context.Background())
+		assert.ErrorIs(t, receiveErr, ErrUnparsableResult)
+		assert.Nil(t, redelivery)
+	}
+	assert.EqualValues(t, 2, p.client.HLen(context.Background(), keys.claimed).Val())
 }
 
 func TestClearResultQueueClearsDurableState(t *testing.T) {

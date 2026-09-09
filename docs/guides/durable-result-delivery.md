@@ -48,6 +48,7 @@ Both values are explicit producer options, and `ResultDeliveryConfig` reports th
 
 - Delivery is at least once until ACK. A failure after checkpointing but before ACK can redeliver, so the consumer must deduplicate before producing externally visible output.
 - Only the current lease owner can renew or ACK. Lease expiry fences stale replicas.
+- Malformed payloads remain in leased claim state instead of being discarded. `ReceiveResult` returns `ErrUnparsableResult`; consumers should report it and continue receiving so valid records behind it can progress. The malformed payload becomes eligible for redelivery after its lease expires, which permits recovery after a compatible reader is rolled out.
 - FIFO ordering and arbitrary exact `ResultQueueName` routes are preserved. Claims never move a result to a different route.
 - Redis persistence and replication remain part of the durability contract; a non-persistent Redis loss is outside this guarantee.
 - Result transport durability does not implement Batch Gateway job manifests, replacement-pod route takeover, output reconstruction, or checkpointing. Those remain Batch Gateway #645 responsibilities.

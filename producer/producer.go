@@ -8,10 +8,17 @@ import (
 	"github.com/llm-d/llm-d-async/api"
 )
 
-// ErrResultDeliveryOwnershipLost means a durable result delivery's lease is
-// no longer owned by this consumer. A stale consumer must stop renewing or
-// acknowledging that delivery.
-var ErrResultDeliveryOwnershipLost = errors.New("result delivery ownership lost")
+var (
+	// ErrResultDeliveryOwnershipLost means a durable result delivery's lease is
+	// no longer owned by this consumer. A stale consumer must stop renewing or
+	// acknowledging that delivery.
+	ErrResultDeliveryOwnershipLost = errors.New("result delivery ownership lost")
+
+	// ErrUnparsableResult means ReceiveResult encountered a malformed result.
+	// The payload remains in leased claim state for redelivery after expiry;
+	// consumers should report the error and continue receiving the route.
+	ErrUnparsableResult = errors.New("unparsable result")
+)
 
 // ResultDelivery is a leased, non-destructive result delivery. Result is safe
 // to checkpoint before AckResult is called. The ownership proof is deliberately

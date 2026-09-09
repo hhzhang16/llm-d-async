@@ -65,6 +65,12 @@ local pending = math.min(redis.call('LLEN', KEYS[1]), tonumber(ARGV[4]))
 if pending == 0 then
   return {}
 end
+local function claim(payload, claimID)
+  redis.call('RPOP', KEYS[1])
+  redis.call('HSET', KEYS[2], claimID, payload)
+  redis.call('HSET', KEYS[3], claimID, ARGV[1])
+  redis.call('ZADD', KEYS[4], now + tonumber(ARGV[2]), claimID)
+end
 for _ = 1, pending do
   local payload = redis.call('LINDEX', KEYS[1], -1)
   if not payload then
@@ -73,16 +79,18 @@ for _ = 1, pending do
 
   local decodedOK, result = pcall(cjson.decode, payload)
   if not decodedOK or type(result) ~= 'table' or type(result['id']) ~= 'string' or result['id'] == '' then
-    redis.call('RPOP', KEYS[1])
-    return {-1, payload}
+    local claimID = string.char(0) .. 'unparsable-result' .. string.char(0) .. ARGV[1]
+    claim(payload, claimID)
+    return {-1, payload, claimID}
   end
 
   local requestToken = result['request_token']
   if requestToken == nil then
     requestToken = ''
   elseif type(requestToken) ~= 'string' then
-    redis.call('RPOP', KEYS[1])
-    return {-1, payload}
+    local claimID = string.char(0) .. 'unparsable-result' .. string.char(0) .. ARGV[1]
+    claim(payload, claimID)
+    return {-1, payload, claimID}
   end
 
   local claimID = result['id']
@@ -100,10 +108,7 @@ for _ = 1, pending do
   elseif redis.call('HEXISTS', KEYS[3], claimID) == 1 then
     redis.call('RPOP', KEYS[1])
   else
-    redis.call('RPOP', KEYS[1])
-    redis.call('HSET', KEYS[2], claimID, payload)
-    redis.call('HSET', KEYS[3], claimID, ARGV[1])
-    redis.call('ZADD', KEYS[4], now + tonumber(ARGV[2]), claimID)
+    claim(payload, claimID)
     return {1, payload, claimID}
   end
 end
@@ -153,16 +158,6 @@ end
 return 0
 `)
 
-var discardResultDeliveryScript = redis.NewScript(`
-if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] or ARGV[2] == '' then
-  return 0
-end
-redis.call('HDEL', KEYS[1], ARGV[1])
-redis.call('HDEL', KEYS[2], ARGV[1])
-redis.call('ZREM', KEYS[3], ARGV[1])
-return 1
-`)
-
 // ResultDeliveryConfig returns the effective lease and reclaim settings so a
 // deployment can report its result recovery-time contract.
 func (p *RedisSortedSetProducer) ResultDeliveryConfig() ResultDeliveryConfig {
@@ -177,12 +172,11 @@ func (p *RedisSortedSetProducer) ResultDeliveryConfig() ResultDeliveryConfig {
 // an expired lease is requeued for another receiver.
 func (p *RedisSortedSetProducer) ReceiveResult(ctx context.Context) (*ResultDelivery, error) {
 	keys := newResultClaimKeys(p.resultQueueName)
+	ownerToken, err := newRequestToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create result claim owner: %w", err)
+	}
 	for {
-		ownerToken, err := newRequestToken()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create result claim owner: %w", err)
-		}
-
 		raw, err := receiveResultScript.Run(ctx, p.client, []string{
 			keys.pending, keys.claimed, keys.owners, keys.idx, keys.tombstones,
 		}, ownerToken, max(int64(1), p.resultClaimLeaseTTL.Milliseconds()), resultReclaimBatchSize,
@@ -214,7 +208,10 @@ func (p *RedisSortedSetProducer) ReceiveResult(ctx context.Context) (*ResultDeli
 				return nil, fmt.Errorf("unexpected durable result payload type %T", values[1])
 			}
 			if status == -1 {
-				return nil, errors.New("failed to parse durable result: missing valid 'id' or 'request_token' field")
+				if len(values) != 3 {
+					return nil, errors.New("unexpected durable result response")
+				}
+				return nil, fmt.Errorf("%w: missing valid 'id' or 'request_token' field", ErrUnparsableResult)
 			}
 			if status != 1 || len(values) != 3 {
 				return nil, errors.New("unexpected durable result response")
@@ -225,13 +222,7 @@ func (p *RedisSortedSetProducer) ReceiveResult(ctx context.Context) (*ResultDeli
 			}
 			result, err := p.parseResult(payload)
 			if err != nil {
-				discardErr := discardResultDeliveryScript.Run(ctx, p.client, []string{
-					keys.claimed, keys.owners, keys.idx,
-				}, claimID, ownerToken).Err()
-				if discardErr != nil {
-					return nil, errors.Join(err, fmt.Errorf("failed to discard unparseable durable result: %w", discardErr))
-				}
-				return nil, err
+				return nil, fmt.Errorf("%w: %v", ErrUnparsableResult, err)
 			}
 			return &ResultDelivery{Result: result, claimID: claimID, ownerToken: ownerToken}, nil
 		}
